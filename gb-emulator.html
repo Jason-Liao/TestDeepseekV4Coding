@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Game Boy Emulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  font-family: 'Courier New', monospace;
+  color: #e0e0e0;
+}
+.emu-container {
+  background: #2d2d44;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  text-align: center;
+}
+h1 { font-size: 20px; margin-bottom: 16px; color: #8be9fd; }
+.canvas-wrap {
+  position: relative;
+  display: inline-block;
+  border: 3px solid #444;
+  border-radius: 4px;
+}
+canvas { display: block; width: 640px; height: 576px; image-rendering: pixelated; image-rendering: crisp-edges; }
+.controls {
+  margin-top: 16px;
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  align-items: center;
+}
+button, .file-label {
+  background: #444;
+  color: #e0e0e0;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 14px;
+  transition: background 0.2s;
+}
+button:hover, .file-label:hover { background: #555; }
+#romFile { display: none; }
+.keymap { margin-top: 12px; font-size: 12px; color: #888; }
+.keymap span { color: #8be9fd; }
+.status { margin-top: 8px; font-size: 13px; min-height: 20px; }
+.error { color: #ff5555; }
+.fps { color: #50fa7b; margin-left: 8px; }
+</style>
+</head>
+<body>
+<div class="emu-container">
+  <h1>Game Boy Emulator</h1>
+  <div class="canvas-wrap">
+    <canvas id="screen" width="160" height="144"></canvas>
+  </div>
+  <div class="controls">
+    <label class="file-label" for="romFile">Load ROM</label>
+    <input type="file" id="romFile" accept=".gb,.gbc">
+    <button id="runBtn">Run</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="resetBtn">Reset</button>
+    <select id="scaleSelect">
+      <option value="2">2x</option>
+      <option value="3">3x</option>
+      <option value="4" selected>4x</option>
+      <option value="5">5x</option>
+    </select>
+  </div>
+  <div class="status">
+    <span id="statusMsg">Load a ROM file to start</span>
+    <span class="fps" id="fpsDisplay"></span>
+  </div>
+  <div class="keymap">
+    D-Pad: <span>Arrow Keys</span> | A: <span>Z</span> | B: <span>X</span> |
+    Start: <span>Enter</span> | Select: <span>Space</span>
+  </div>
+</div>
+
+<script>
+const CYCLES_PER_FRAME = 70224;
+const COLORS = [
+  [0xD8, 0xF8, 0xD8, 255], // lightest
+  [0x88, 0xD8, 0x88, 255],
+  [0x38, 0x88, 0x38, 255],
+  [0x08, 0x38, 0x08, 255], // darkest
+];
+
+// ===========================
+// CPU core + opcodes + tables
+// ===========================
+const cyclesTable = [
+  4,12, 8, 8, 4, 4, 8, 4,20, 8, 8, 8, 4, 4, 8, 4,
+  4,12, 8, 8, 4, 4, 8, 4,12, 8, 8, 8, 4, 4, 8, 4,
+  8,12, 8, 8, 4, 4, 8, 4, 8, 8, 8, 8, 4, 4, 8, 4,
+  8,12, 8, 8,12,12,12, 4, 8, 8, 8, 8, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  8, 8, 8, 8, 8, 8, 4, 8, 4, 4, 4, 4, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  4, 4, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 8, 4,
+  8,12,12,16,12,16, 8,16, 8,16,12, 8,12,24, 8,16,
+  8,12,12, 0,12,16, 8,16, 8,16,12, 0,12, 0, 8,16,
+ 12,12, 8, 0, 0,16, 8,16,16, 4,16, 0, 0, 0, 8,16,
+ 12,12, 8, 4, 0,16, 8,16,12, 8,16, 4, 0, 0, 8,16,
+];
+const cbCyclesTable = [
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,12, 8, 8, 8, 8, 8, 8, 8,12, 8,
+  8, 8, 8, 8, 8, 8,12, 8, 8, 8, 8, 8, 8, 8,12, 8,
+  8, 8, 8, 8, 8, 8,12, 8, 8, 8, 8, 8, 8, 8,12, 8,
+  8, 8, 8, 8, 8, 8,12, 8, 8, 8, 8, 8, 8, 8,12, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+  8, 8, 8, 8, 8, 8,16, 8, 8, 8, 8, 8, 8, 8,16, 8,
+];
+
+class GameBoy {
+  constructor() {
+    this.rom = new Uint8Array(0);  // will be replaced by loadROM
+    this.vram = new Uint8Array(0x2000);
+    this.wram = new Uint8Array(0x2000);
+    this.oam = new Uint8Array(0xA0);
+    this.io = new Uint8Array(0x80);
+    this.hram = new Uint8Array(0x7F);
+
+    this.a = this.f = this.b = this.c = this.d = this.e = this.h = this.l = 0;
+    this.sp = 0xFFFE; this.pc = 0x0100;
+
+    this.romBank = 1; this.ramBank = 0; this.mbcType = 0;
+    this.ramEnable = false; this.ram = new Uint8Array(0x8000);
+
+    this.frameBuffer = new Uint8ClampedArray(160 * 144 * 4);
+    for (let i = 0; i < 160 * 144; i++) this.frameBuffer[i * 4 + 3] = 255;
+    this.bgColorIdx = new Uint8Array(160);
+
+    this.scanline = 0;
+    this.lineCycles = 0;  // cycles within current scanline (0-455)
+    this._divCounter = 0xAB00;  // 16-bit internal counter at CPU rate, upper 8 bits = DIV
+    this.TIMA = 0;
+    this.TMA = 0;
+    this.TAC = 0xF8;
+    this.systemCycles = 0; // total cycles accumulated in current frame
+
+    this.interruptFlags = 0x00; // IF: no interrupts pending on start
+    this.ie = 0;               // IE
+
+    this.joypadState = 0xFF;
+    this.joypadSelect = 0;
+
+    this.ime = true;
+    this.imePending = false;
+    this.halted = false;
+    this.stopped = false;
+    this._lycMatched = false;
+  }
+
+  // === MMU ===
+  read(addr) {
+    addr &= 0xFFFF;
+    if (addr < 0x4000) return this.rom[addr];
+    if (addr < 0x8000) {
+      let offset = (addr & 0x3FFF) + this.romBank * 0x4000;
+      if (offset >= this.rom.length) offset &= (this.rom.length - 1);
+      return this.rom[offset];
+    }
+    if (addr < 0xA000) return this.vram[addr & 0x1FFF];
+    if (addr < 0xC000) {
+      if (!this.ramEnable) return 0xFF;
+      if (this.ramBank >= 4) return 0xFF; // MBC3 RTC registers, not used
+      return this.ram[(addr - 0xA000) + this.ramBank * 0x2000];
+    }
+    if (addr < 0xE000) return this.wram[addr & 0x1FFF];
+    if (addr < 0xFE00) return this.wram[addr & 0x1FFF]; // echo WRAM
+    if (addr < 0xFEA0) return this.oam[addr & 0xFF];
+    if (addr < 0xFF00) return 0xFF;
+    if (addr < 0xFF80) return this.ioRead(addr & 0xFF);
+    if (addr < 0xFFFF) return this.hram[addr & 0x7F];
+    return this.ie;
+  }
+
+  write(addr, val) {
+    addr &= 0xFFFF; val &= 0xFF;
+    if (addr < 0x8000) { this.mbcWrite(addr, val); return; }
+    if (addr < 0xA000) { this.vram[addr & 0x1FFF] = val; return; }
+    if (addr < 0xC000) {
+      if (this.ramEnable && this.ramBank < 4) this.ram[(addr - 0xA000) + this.ramBank * 0x2000] = val;
+      return;
+    }
+    if (addr < 0xE000) { this.wram[addr & 0x1FFF] = val; return; }
+    if (addr < 0xFE00) { this.wram[addr & 0x1FFF] = val; return; }
+    if (addr < 0xFEA0) { this.oam[addr & 0xFF] = val; return; }
+    if (addr < 0xFF00) return;
+    if (addr < 0xFF80) { this.ioWrite(addr & 0xFF, val); return; }
+    if (addr < 0xFFFF) { this.hram[addr & 0x7F] = val; return; }
+    this.ie = val;
+  }
+
+  mbcWrite(addr, val) {
+    if (this.mbcType === 0) return;
+    if (addr < 0x2000) {
+      this.ramEnable = (val & 0x0F) === 0x0A;
+    } else if (addr < 0x4000) {
+      // MBC1: bits 0-4; MBC3: bits 0-6. Mask doesn't matter much for correctness
+      let bank = val & (this.mbcType <= 0x03 ? 0x1F : 0x7F);
+      if (bank === 0) bank = 1;
+      this.romBank = bank;
+    } else if (addr < 0x6000) {
+      if (this.mbcType >= 0x0F && this.mbcType <= 0x13) {
+        // MBC3: RAM bank 0-3 or RTC register 0x08-0x0C
+        this.ramBank = val & 0x0F;
+      } else {
+        this.ramBank = val & 0x03;
+      }
+    }
+    // MBC3 0x6000-0x7FFF: RTC latch, not needed for Pokemon Blue
+  }
+
+  ioRead(port) {
+    switch (port) {
+      case 0x00: { // JOYP
+        let r = this.joypadSelect | 0x0F;
+        if (!(this.joypadSelect & 0x10)) {
+          if (!(this.joypadState & 0x01)) r &= ~0x08;
+          if (!(this.joypadState & 0x02)) r &= ~0x04;
+          if (!(this.joypadState & 0x04)) r &= ~0x02;
+          if (!(this.joypadState & 0x08)) r &= ~0x01;
+        }
+        if (!(this.joypadSelect & 0x20)) {
+          if (!(this.joypadState & 0x10)) r &= ~0x08;
+          if (!(this.joypadState & 0x20)) r &= ~0x04;
+          if (!(this.joypadState & 0x40)) r &= ~0x02;
+          if (!(this.joypadState & 0x80)) r &= ~0x01;
+        }
+        return r;
+      }
+      case 0x01: return this.io[1]; // SB
+      case 0x02: return this.io[2]; // SC
+      case 0x04: return this._divCounter >> 8; // DIV
+      case 0x05: return this.TIMA;
+      case 0x06: return this.TMA;
+      case 0x07: return this.TAC;
+      case 0x0F: return this.interruptFlags | 0xE0;
+      case 0x40: return this.io[0x40]; // LCDC
+      case 0x41: return this.io[0x41]; // STAT
+      case 0x42: return this.io[0x42]; // SCY
+      case 0x43: return this.io[0x43]; // SCX
+      case 0x44: return this.scanline; // LY
+      case 0x45: return this.io[0x45]; // LYC
+      case 0x46: return this.io[0x46]; // DMA addr
+      case 0x47: return this.io[0x47]; // BGP
+      case 0x48: return this.io[0x48]; // OBP0
+      case 0x49: return this.io[0x49]; // OBP1
+      case 0x4A: return this.io[0x4A]; // WY
+      case 0x4B: return this.io[0x4B]; // WX
+      default: return this.io[port] || 0xFF;
+    }
+  }
+
+  ioWrite(port, val) {
+    switch (port) {
+      case 0x00: this.joypadSelect = val & 0x30; return;
+      case 0x01: this.io[1] = val; return;
+      case 0x02: this.io[2] = val & 0x81; return;
+      case 0x04: this._divCounter = 0; return;
+      case 0x05: this.TIMA = val; return;
+      case 0x06: this.TMA = val; return;
+      case 0x07: this.TAC = val | 0xF8; return;
+      case 0x0F: this.interruptFlags = val & 0x1F; return;
+      case 0x40: this.io[0x40] = val; return;
+      case 0x41: this.io[0x41] = (val & 0xF8) | (this.io[0x41] & 0x07); return;
+      case 0x42: this.io[0x42] = val; return;
+      case 0x43: this.io[0x43] = val; return;
+      case 0x45: this.io[0x45] = val; return;
+      case 0x46: this.dma(val); return;
+      case 0x47: this.io[0x47] = val; return;
+      case 0x48: this.io[0x48] = val & 0xFC; return;
+      case 0x49: this.io[0x49] = val & 0xFC; return;
+      case 0x4A: this.io[0x4A] = val; return;
+      case 0x4B: this.io[0x4B] = val; return;
+      default: this.io[port] = val; return;
+    }
+  }
+
+  dma(val) {
+    let src = (val & 0xDF) << 8; // DMA source is 0xXX00-0xXX9F
+    for (let i = 0; i < 0xA0; i++) this.oam[i] = this.read(src | i);
+  }
+
+  // === Input ===
+  keyDown(key) {
+    switch (key) {
+      case 'ArrowRight': this.joypadState &= ~0x08; break;
+      case 'ArrowLeft':  this.joypadState &= ~0x04; break;
+      case 'ArrowUp':    this.joypadState &= ~0x02; break;
+      case 'ArrowDown':  this.joypadState &= ~0x01; break;
+      case 'z': case 'Z': this.joypadState &= ~0x80; break;
+      case 'x': case 'X': this.joypadState &= ~0x40; break;
+      case 'Enter':      this.joypadState &= ~0x10; break;
+      case ' ':          this.joypadState &= ~0x20; break;
+    }
+    this.interruptFlags |= 0x10;
+  }
+
+  keyUp(key) {
+    switch (key) {
+      case 'ArrowRight': this.joypadState |= 0x08; break;
+      case 'ArrowLeft':  this.joypadState |= 0x04; break;
+      case 'ArrowUp':    this.joypadState |= 0x02; break;
+      case 'ArrowDown':  this.joypadState |= 0x01; break;
+      case 'z': case 'Z': this.joypadState |= 0x80; break;
+      case 'x': case 'X': this.joypadState |= 0x40; break;
+      case 'Enter':      this.joypadState |= 0x10; break;
+      case ' ':          this.joypadState |= 0x20; break;
+    }
+  }
+
+  // === CPU helpers ===
+  get AF() { return (this.a << 8) | (this.f & 0xF0); }
+  set AF(v) { this.a = v >> 8; this.f = v & 0xF0; }
+  get BC() { return (this.b << 8) | this.c; }
+  set BC(v) { this.b = v >> 8; this.c = v & 0xFF; }
+  get DE() { return (this.d << 8) | this.e; }
+  set DE(v) { this.d = v >> 8; this.e = v & 0xFF; }
+  get HL() { return (this.h << 8) | this.l; }
+  set HL(v) { this.h = v >> 8; this.l = v & 0xFF; }
+
+  flagZ(v) { if (v) this.f |= 0x80; else this.f &= 0x7F; }
+  flagN(v) { if (v) this.f |= 0x40; else this.f &= 0xBF; }
+  flagH(v) { if (v) this.f |= 0x20; else this.f &= 0xDF; }
+  flagC(v) { if (v) this.f |= 0x10; else this.f &= 0xEF; }
+
+  getZ() { return (this.f >> 7) & 1; }
+  getN() { return (this.f >> 6) & 1; }
+  getH() { return (this.f >> 5) & 1; }
+  getC() { return (this.f >> 4) & 1; }
+
+  // === Cycle tick (advances all subsystems) ===
+  tick(cycles) {
+    for (let c = 0; c < cycles; c++) {
+      this.systemCycles++;
+
+      // DIV: 16-bit counter increments at CPU rate, upper 8 bits = DIV register
+      this._divCounter = (this._divCounter + 1) & 0xFFFF;
+
+      // Timer: TIMA increments on falling edge of selected bit of internal counter
+      let tacEnable = this.TAC & 0x04;
+      if (tacEnable) {
+        let timerBit;
+        switch (this.TAC & 0x03) {
+          case 0: timerBit = 9; break;  // CPU/1024 Hz
+          case 1: timerBit = 3; break;  // CPU/16 Hz
+          case 2: timerBit = 5; break;  // CPU/64 Hz
+          case 3: timerBit = 7; break;  // CPU/256 Hz
+        }
+        let bit = (this._divCounter >> timerBit) & 1;
+        if (this._prevTimerBit && !bit) {
+          if (this.TIMA === 0xFF) {
+            this.TIMA = this.TMA;
+            this.interruptFlags |= 0x04;
+          } else {
+            this.TIMA++;
+          }
+        }
+        this._prevTimerBit = bit;
+      } else {
+        this._prevTimerBit = false;
+      }
+
+      // PPU
+      this.stepPPU();
+    }
+  }
+
+  _prevTimerBit = false;
+
+  stepPPU() {
+    if (!(this.io[0x40] & 0x80)) {
+      // LCD off: reset LY and mode
+      this.scanline = 0;
+      this.lineCycles = 0;
+      this.io[0x41] = (this.io[0x41] & 0xF8) | 0x00;
+      return;
+    }
+
+    this.lineCycles++;
+
+    let stat = this.io[0x41];
+    let prevMode = stat & 0x03;
+    let newMode;
+
+    if (this.scanline >= 144) {
+      newMode = 1;
+      if (prevMode !== 1 && this.scanline === 144) {
+        this.interruptFlags |= 0x01; // VBlank interrupt
+        if (stat & 0x10) this.interruptFlags |= 0x02; // STAT mode 1
+      }
+    } else {
+      if (this.lineCycles < 80) {
+        newMode = 2; // OAM scan (cycles 0-79)
+      } else if (this.lineCycles < 252) {
+        newMode = 3; // Drawing (cycles 80-251)
+      } else {
+        newMode = 0; // HBlank (cycles 252-455)
+      }
+    }
+
+    // STAT interrupts on mode transitions
+    if (newMode !== prevMode) {
+      if (newMode === 0 && (stat & 0x08)) this.interruptFlags |= 0x02;
+      if (newMode === 1 && (stat & 0x10)) this.interruptFlags |= 0x02;
+      if (newMode === 2 && (stat & 0x20)) this.interruptFlags |= 0x02;
+    }
+
+    // LYC coincidence (edge detection - fire only once per match)
+    let lycMatch = this.scanline === this.io[0x45];
+    if (lycMatch) {
+      stat |= 0x04;
+      if (!this._lycMatched && (stat & 0x40)) this.interruptFlags |= 0x02;
+    } else {
+      stat &= 0xFB;
+    }
+    this._lycMatched = lycMatch;
+
+    this.io[0x41] = (stat & 0xF8) | newMode;
+
+    // Render at end of mode 3 (cycle 252)
+    if (this.lineCycles === 252 && this.scanline < 144) {
+      this.renderScanline(this.scanline);
+    }
+
+    // End of scanline
+    if (this.lineCycles >= 456) {
+      this.lineCycles = 0;
+      this.scanline++;
+      if (this.scanline >= 154) this.scanline = 0;
+    }
+  }
+
+  // === Rendering ===
+  renderScanline(ly) {
+    let lcdc = this.io[0x40];
+    this.renderBG(ly, lcdc);
+    if (lcdc & 0x02) this.renderSprites(ly, lcdc);
+  }
+
+  renderBG(ly, lcdc) {
+    let bgp = this.io[0x47];
+    let scx = this.io[0x43];
+    let scy = this.io[0x42];
+
+    if (!(lcdc & 0x01)) {
+      // BG disabled: fill with color 0
+      for (let x = 0; x < 160; x++) this.putPixelBG(x, ly, 0);
+      return;
+    }
+
+    let tileMap = (lcdc & 0x08) ? 0x1C00 : 0x1800;
+    let tileData = (lcdc & 0x10) ? 0x0000 : 0x0800;
+    let signed = tileData === 0x0800;
+
+    let y = (ly + scy) & 0xFF;
+    let tileRow = (y >> 3) & 31;
+    let lineInTile = y & 7;
+
+    for (let px = 0; px < 160; px++) {
+      let x = (px + scx) & 0xFF;
+      let tileCol = (x >> 3) & 31;
+      let bitInTile = 7 - (x & 7);
+
+      let tileIdx = this.vram[tileMap + tileRow * 32 + tileCol];
+      let addr = signed
+        ? tileData + ((tileIdx + 128) & 0xFF) * 16
+        : tileData + tileIdx * 16;
+
+      let lo = this.vram[addr + lineInTile * 2];
+      let hi = this.vram[addr + lineInTile * 2 + 1];
+      let color = ((hi >> bitInTile) & 1) << 1 | ((lo >> bitInTile) & 1);
+      this.putPixelBG(px, ly, (bgp >> (color * 2)) & 3);
+    }
+
+    // Window
+    if ((lcdc & 0x20) && this.io[0x4A] <= ly) {
+      let wy = this.io[0x4A];
+      let wx = this.io[0x4B] - 7;
+      let winTileMap = (lcdc & 0x40) ? 0x1C00 : 0x1800;
+      let winY = ly - wy;
+      let winTileRow = (winY >> 3) & 31;
+      let winLineInTile = winY & 7;
+
+      for (let px = 0; px < 160; px++) {
+        if (px < wx) continue;
+        let winX = px - wx;
+        let winTileCol = (winX >> 3) & 31;
+        let bitInTile = 7 - (winX & 7);
+
+        let tileIdx = this.vram[winTileMap + winTileRow * 32 + winTileCol];
+        let addr = signed
+          ? tileData + ((tileIdx + 128) & 0xFF) * 16
+          : tileData + tileIdx * 16;
+
+        let lo = this.vram[addr + winLineInTile * 2];
+        let hi = this.vram[addr + winLineInTile * 2 + 1];
+        let color = ((hi >> bitInTile) & 1) << 1 | ((lo >> bitInTile) & 1);
+        this.putPixelBG(px, ly, (bgp >> (color * 2)) & 3);
+      }
+    }
+  }
+
+  renderSprites(ly, lcdc) {
+    let height = (lcdc & 0x04) ? 16 : 8;
+    let sprites = [];
+
+    for (let i = 0; i < 40; i++) {
+      let sy = this.oam[i * 4] - 16;
+      let sx = this.oam[i * 4 + 1] - 8;
+      if (ly >= sy && ly < sy + height) {
+        sprites.push({
+          x: sx, y: sy, tile: this.oam[i * 4 + 2],
+          flags: this.oam[i * 4 + 3], idx: i
+        });
+      }
+      if (sprites.length >= 10) break;
+    }
+
+    // Sort: larger X drawn first (bottom), then higher OAM index drawn first (bottom)
+    // → smaller X + lower OAM index drawn LAST (on top / higher priority)
+    sprites.sort((a, b) => {
+      if (a.x !== b.x) return b.x - a.x;
+      return b.idx - a.idx;
+    });
+
+    for (let s of sprites) {
+      let lineOffset = ly - s.y;
+      if (s.flags & 0x40) lineOffset = height - 1 - lineOffset;
+
+      let tileIdx = s.tile;
+      if (height === 16) {
+        tileIdx &= 0xFE;
+        if (lineOffset >= 8) { tileIdx++; lineOffset -= 8; }
+      }
+
+      let pal = (s.flags & 0x10) ? this.io[0x49] : this.io[0x48];
+      let addr = tileIdx * 16 + lineOffset * 2;
+      let lo = this.vram[addr];
+      let hi = this.vram[addr + 1];
+
+      for (let bit = 0; bit < 8; bit++) {
+        let px = s.x + (s.flags & 0x20 ? 7 - bit : bit);
+        if (px < 0 || px >= 160) continue;
+
+        let color = ((hi >> (7 - bit)) & 1) << 1 | ((lo >> (7 - bit)) & 1);
+        if (color === 0) continue; // transparent
+
+        // OBJ behind BG: only draw if BG color index is 0
+        if (s.flags & 0x80) {
+          if (this.bgColorIdx[px] !== 0) continue;
+        }
+
+        this.putPixel(px, ly, (pal >> (color * 2)) & 3);
+      }
+    }
+  }
+
+  putPixel(x, y, colorIdx) {
+    let c = COLORS[colorIdx & 3];
+    let i = (y * 160 + x) * 4;
+    this.frameBuffer[i] = c[0];
+    this.frameBuffer[i + 1] = c[1];
+    this.frameBuffer[i + 2] = c[2];
+    this.frameBuffer[i + 3] = c[3];
+  }
+
+  putPixelBG(x, y, colorIdx) {
+    this.bgColorIdx[x] = colorIdx & 3;
+    this.putPixel(x, y, colorIdx);
+  }
+
+  // === Interrupts ===
+  handleInterrupts() {
+    let pending = this.interruptFlags & this.ie & 0x1F;
+    let anyFlag = this.interruptFlags & 0x1F;
+
+    if (this.halted && anyFlag) {
+      this.halted = false;
+    }
+
+    if (this.halted) return;
+    if (!pending) return;
+    if (!this.ime) return;
+    this.ime = false;
+
+    // Priority: VBlank(0) > LCD(1) > Timer(2) > Serial(3) > Joypad(4)
+    for (let i = 0; i < 5; i++) {
+      if (pending & (1 << i)) {
+        this.interruptFlags &= ~(1 << i);
+        this.sp = (this.sp - 1) & 0xFFFF;
+        this.write(this.sp, this.pc >> 8);
+        this.sp = (this.sp - 1) & 0xFFFF;
+        this.write(this.sp, this.pc & 0xFF);
+        this.pc = 0x40 + i * 8;
+        this.tick(20);
+        return;
+      }
+    }
+  }
+
+  // === CPU step ===
+  step() {
+    if (this.stopped) { this.tick(4); return; }
+
+    this.handleInterrupts();
+
+    if (this.halted) {
+      this.tick(4);
+      return;
+    }
+
+    let opcode = this.read(this.pc);
+    this.pc = (this.pc + 1) & 0xFFFF;
+    this.exec(opcode);
+
+    if (this.imePending) {
+      this.ime = true;
+      this.imePending = false;
+    }
+  }
+
+  exec(opcode) {
+    let pc = this.pc;
+    let a16, r8, v8, v16;
+
+    switch (opcode) {
+      // 0x00-0x0F
+      case 0x00: this.tick(4); break;
+      case 0x01: this.BC = this.read16(); this.tick(12); break;
+      case 0x02: this.write(this.BC, this.a); this.tick(8); break;
+      case 0x03: this.BC = inc16(this.BC); this.tick(8); break;
+      case 0x04: this.b = this.inc8(this.b); this.tick(4); break;
+      case 0x05: this.b = this.dec8(this.b); this.tick(4); break;
+      case 0x06: this.b = this.read8(); this.tick(8); break;
+      case 0x07: // RLCA
+        this.flagC(this.a >> 7);
+        this.a = ((this.a << 1) | (this.a >> 7)) & 0xFF;
+        this.flagZ(0); this.flagN(0); this.flagH(0); this.tick(4); break;
+      case 0x08: // LD (a16), SP
+        a16 = this.read16();
+        this.write(a16, this.sp & 0xFF);
+        this.write(a16 + 1, this.sp >> 8);
+        this.tick(20); break;
+      case 0x09: this.addHL(this.BC); this.tick(8); break;
+      case 0x0A: this.a = this.read(this.BC); this.tick(8); break;
+      case 0x0B: this.BC = dec16(this.BC); this.tick(8); break;
+      case 0x0C: this.c = this.inc8(this.c); this.tick(4); break;
+      case 0x0D: this.c = this.dec8(this.c); this.tick(4); break;
+      case 0x0E: this.c = this.read8(); this.tick(8); break;
+      case 0x0F: // RRCA
+        this.flagC(this.a & 1);
+        this.a = ((this.a >> 1) | (this.a << 7)) & 0xFF;
+        this.flagZ(0); this.flagN(0); this.flagH(0); this.tick(4); break;
+
+      // 0x10-0x1F
+      case 0x10:
+        this.pc++; this.stopped = true; this.tick(4); break;
+      case 0x11: this.DE = this.read16(); this.tick(12); break;
+      case 0x12: this.write(this.DE, this.a); this.tick(8); break;
+      case 0x13: this.DE = inc16(this.DE); this.tick(8); break;
+      case 0x14: this.d = this.inc8(this.d); this.tick(4); break;
+      case 0x15: this.d = this.dec8(this.d); this.tick(4); break;
+      case 0x16: this.d = this.read8(); this.tick(8); break;
+      case 0x17: { // RLA
+        let c = this.getC();
+        this.flagC(this.a >> 7);
+        this.a = ((this.a << 1) | c) & 0xFF;
+        this.flagZ(0); this.flagN(0); this.flagH(0); this.tick(4); break;
+      }
+      case 0x18: this.jr(); break;
+      case 0x19: this.addHL(this.DE); this.tick(8); break;
+      case 0x1A: this.a = this.read(this.DE); this.tick(8); break;
+      case 0x1B: this.DE = dec16(this.DE); this.tick(8); break;
+      case 0x1C: this.e = this.inc8(this.e); this.tick(4); break;
+      case 0x1D: this.e = this.dec8(this.e); this.tick(4); break;
+      case 0x1E: this.e = this.read8(); this.tick(8); break;
+      case 0x1F: { // RRA
+        let c = this.getC() << 7;
+        this.flagC(this.a & 1);
+        this.a = ((this.a >> 1) | c) & 0xFF;
+        this.flagZ(0); this.flagN(0); this.flagH(0); this.tick(4); break;
+      }
+
+      // 0x20-0x2F
+      case 0x20: this.jrCond(!this.getZ()); break;
+      case 0x21: this.HL = this.read16(); this.tick(12); break;
+      case 0x22: this.write(this.HL, this.a); this.HL = inc16(this.HL); this.tick(8); break;
+      case 0x23: this.HL = inc16(this.HL); this.tick(8); break;
+      case 0x24: this.h = this.inc8(this.h); this.tick(4); break;
+      case 0x25: this.h = this.dec8(this.h); this.tick(4); break;
+      case 0x26: this.h = this.read8(); this.tick(8); break;
+      case 0x27: this.daa(); this.tick(4); break;
+      case 0x28: this.jrCond(this.getZ()); break;
+      case 0x29: this.addHL(this.HL); this.tick(8); break;
+      case 0x2A: this.a = this.read(this.HL); this.HL = inc16(this.HL); this.tick(8); break;
+      case 0x2B: this.HL = dec16(this.HL); this.tick(8); break;
+      case 0x2C: this.l = this.inc8(this.l); this.tick(4); break;
+      case 0x2D: this.l = this.dec8(this.l); this.tick(4); break;
+      case 0x2E: this.l = this.read8(); this.tick(8); break;
+      case 0x2F: this.a ^= 0xFF; this.flagN(1); this.flagH(1); this.tick(4); break;
+
+      // 0x30-0x3F
+      case 0x30: this.jrCond(!this.getC()); break;
+      case 0x31: this.sp = this.read16(); this.tick(12); break;
+      case 0x32: this.write(this.HL, this.a); this.HL = dec16(this.HL); this.tick(8); break;
+      case 0x33: this.sp = inc16(this.sp); this.tick(8); break;
+      case 0x34: this.writeHL(this.inc8(this.readHL())); this.tick(12); break;
+      case 0x35: this.writeHL(this.dec8(this.readHL())); this.tick(12); break;
+      case 0x36: this.writeHL(this.read8()); this.tick(12); break;
+      case 0x37: this.flagN(0); this.flagH(0); this.flagC(1); this.tick(4); break;
+      case 0x38: this.jrCond(this.getC()); break;
+      case 0x39: this.addHLSp(); this.tick(8); break;
+      case 0x3A: this.a = this.read(this.HL); this.HL = dec16(this.HL); this.tick(8); break;
+      case 0x3B: this.sp = dec16(this.sp); this.tick(8); break;
+      case 0x3C: this.a = this.inc8(this.a); this.tick(4); break;
+      case 0x3D: this.a = this.dec8(this.a); this.tick(4); break;
+      case 0x3E: this.a = this.read8(); this.tick(8); break;
+      case 0x3F: this.flagN(0); this.flagH(0); this.flagC(!this.getC()); this.tick(4); break;
+
+      // 0x40-0x7F: LD r, r'
+      case 0x40: this.tick(4); break; // B,B
+      case 0x41: this.b = this.c; this.tick(4); break;
+      case 0x42: this.b = this.d; this.tick(4); break;
+      case 0x43: this.b = this.e; this.tick(4); break;
+      case 0x44: this.b = this.h; this.tick(4); break;
+      case 0x45: this.b = this.l; this.tick(4); break;
+      case 0x46: this.b = this.readHL(); this.tick(8); break;
+      case 0x47: this.b = this.a; this.tick(4); break;
+      case 0x48: this.c = this.b; this.tick(4); break;
+      case 0x49: this.tick(4); break; // C,C
+      case 0x4A: this.c = this.d; this.tick(4); break;
+      case 0x4B: this.c = this.e; this.tick(4); break;
+      case 0x4C: this.c = this.h; this.tick(4); break;
+      case 0x4D: this.c = this.l; this.tick(4); break;
+      case 0x4E: this.c = this.readHL(); this.tick(8); break;
+      case 0x4F: this.c = this.a; this.tick(4); break;
+      case 0x50: this.d = this.b; this.tick(4); break;
+      case 0x51: this.d = this.c; this.tick(4); break;
+      case 0x52: this.tick(4); break; // D,D
+      case 0x53: this.d = this.e; this.tick(4); break;
+      case 0x54: this.d = this.h; this.tick(4); break;
+      case 0x55: this.d = this.l; this.tick(4); break;
+      case 0x56: this.d = this.readHL(); this.tick(8); break;
+      case 0x57: this.d = this.a; this.tick(4); break;
+      case 0x58: this.e = this.b; this.tick(4); break;
+      case 0x59: this.e = this.c; this.tick(4); break;
+      case 0x5A: this.e = this.d; this.tick(4); break;
+      case 0x5B: this.tick(4); break; // E,E
+      case 0x5C: this.e = this.h; this.tick(4); break;
+      case 0x5D: this.e = this.l; this.tick(4); break;
+      case 0x5E: this.e = this.readHL(); this.tick(8); break;
+      case 0x5F: this.e = this.a; this.tick(4); break;
+      case 0x60: this.h = this.b; this.tick(4); break;
+      case 0x61: this.h = this.c; this.tick(4); break;
+      case 0x62: this.h = this.d; this.tick(4); break;
+      case 0x63: this.h = this.e; this.tick(4); break;
+      case 0x64: this.tick(4); break; // H,H
+      case 0x65: this.h = this.l; this.tick(4); break;
+      case 0x66: this.h = this.readHL(); this.tick(8); break;
+      case 0x67: this.h = this.a; this.tick(4); break;
+      case 0x68: this.l = this.b; this.tick(4); break;
+      case 0x69: this.l = this.c; this.tick(4); break;
+      case 0x6A: this.l = this.d; this.tick(4); break;
+      case 0x6B: this.l = this.e; this.tick(4); break;
+      case 0x6C: this.l = this.h; this.tick(4); break;
+      case 0x6D: this.tick(4); break; // L,L
+      case 0x6E: this.l = this.readHL(); this.tick(8); break;
+      case 0x6F: this.l = this.a; this.tick(4); break;
+      case 0x70: this.writeHL(this.b); this.tick(8); break;
+      case 0x71: this.writeHL(this.c); this.tick(8); break;
+      case 0x72: this.writeHL(this.d); this.tick(8); break;
+      case 0x73: this.writeHL(this.e); this.tick(8); break;
+      case 0x74: this.writeHL(this.h); this.tick(8); break;
+      case 0x75: this.writeHL(this.l); this.tick(8); break;
+      case 0x76: this.halted = true; this.tick(4); break;
+      case 0x77: this.writeHL(this.a); this.tick(8); break;
+      case 0x78: this.a = this.b; this.tick(4); break;
+      case 0x79: this.a = this.c; this.tick(4); break;
+      case 0x7A: this.a = this.d; this.tick(4); break;
+      case 0x7B: this.a = this.e; this.tick(4); break;
+      case 0x7C: this.a = this.h; this.tick(4); break;
+      case 0x7D: this.a = this.l; this.tick(4); break;
+      case 0x7E: this.a = this.readHL(); this.tick(8); break;
+      case 0x7F: this.tick(4); break; // A,A
+
+      // 0x80-0x87: ADD A,r
+      case 0x80: this.add(this.b); this.tick(4); break;
+      case 0x81: this.add(this.c); this.tick(4); break;
+      case 0x82: this.add(this.d); this.tick(4); break;
+      case 0x83: this.add(this.e); this.tick(4); break;
+      case 0x84: this.add(this.h); this.tick(4); break;
+      case 0x85: this.add(this.l); this.tick(4); break;
+      case 0x86: this.add(this.readHL()); this.tick(8); break;
+      case 0x87: this.add(this.a); this.tick(4); break;
+      // 0x88-0x8F: ADC A,r
+      case 0x88: this.adc(this.b); this.tick(4); break;
+      case 0x89: this.adc(this.c); this.tick(4); break;
+      case 0x8A: this.adc(this.d); this.tick(4); break;
+      case 0x8B: this.adc(this.e); this.tick(4); break;
+      case 0x8C: this.adc(this.h); this.tick(4); break;
+      case 0x8D: this.adc(this.l); this.tick(4); break;
+      case 0x8E: this.adc(this.readHL()); this.tick(8); break;
+      case 0x8F: this.adc(this.a); this.tick(4); break;
+      // 0x90-0x97: SUB r
+      case 0x90: this.sub(this.b); this.tick(4); break;
+      case 0x91: this.sub(this.c); this.tick(4); break;
+      case 0x92: this.sub(this.d); this.tick(4); break;
+      case 0x93: this.sub(this.e); this.tick(4); break;
+      case 0x94: this.sub(this.h); this.tick(4); break;
+      case 0x95: this.sub(this.l); this.tick(4); break;
+      case 0x96: this.sub(this.readHL()); this.tick(8); break;
+      case 0x97: this.sub(this.a); this.tick(4); break;
+      // 0x98-0x9F: SBC A,r
+      case 0x98: this.sbc(this.b); this.tick(4); break;
+      case 0x99: this.sbc(this.c); this.tick(4); break;
+      case 0x9A: this.sbc(this.d); this.tick(4); break;
+      case 0x9B: this.sbc(this.e); this.tick(4); break;
+      case 0x9C: this.sbc(this.h); this.tick(4); break;
+      case 0x9D: this.sbc(this.l); this.tick(4); break;
+      case 0x9E: this.sbc(this.readHL()); this.tick(8); break;
+      case 0x9F: this.sbc(this.a); this.tick(4); break;
+      // 0xA0-0xA7: AND r
+      case 0xA0: this.and(this.b); this.tick(4); break;
+      case 0xA1: this.and(this.c); this.tick(4); break;
+      case 0xA2: this.and(this.d); this.tick(4); break;
+      case 0xA3: this.and(this.e); this.tick(4); break;
+      case 0xA4: this.and(this.h); this.tick(4); break;
+      case 0xA5: this.and(this.l); this.tick(4); break;
+      case 0xA6: this.and(this.readHL()); this.tick(8); break;
+      case 0xA7: this.and(this.a); this.tick(4); break;
+      // 0xA8-0xAF: XOR r
+      case 0xA8: this.xor(this.b); this.tick(4); break;
+      case 0xA9: this.xor(this.c); this.tick(4); break;
+      case 0xAA: this.xor(this.d); this.tick(4); break;
+      case 0xAB: this.xor(this.e); this.tick(4); break;
+      case 0xAC: this.xor(this.h); this.tick(4); break;
+      case 0xAD: this.xor(this.l); this.tick(4); break;
+      case 0xAE: this.xor(this.readHL()); this.tick(8); break;
+      case 0xAF: this.xor(this.a); this.tick(4); break;
+      // 0xB0-0xB7: OR r
+      case 0xB0: this.or(this.b); this.tick(4); break;
+      case 0xB1: this.or(this.c); this.tick(4); break;
+      case 0xB2: this.or(this.d); this.tick(4); break;
+      case 0xB3: this.or(this.e); this.tick(4); break;
+      case 0xB4: this.or(this.h); this.tick(4); break;
+      case 0xB5: this.or(this.l); this.tick(4); break;
+      case 0xB6: this.or(this.readHL()); this.tick(8); break;
+      case 0xB7: this.or(this.a); this.tick(4); break;
+      // 0xB8-0xBF: CP r
+      case 0xB8: this.cp(this.b); this.tick(4); break;
+      case 0xB9: this.cp(this.c); this.tick(4); break;
+      case 0xBA: this.cp(this.d); this.tick(4); break;
+      case 0xBB: this.cp(this.e); this.tick(4); break;
+      case 0xBC: this.cp(this.h); this.tick(4); break;
+      case 0xBD: this.cp(this.l); this.tick(4); break;
+      case 0xBE: this.cp(this.readHL()); this.tick(8); break;
+      case 0xBF: this.cp(this.a); this.tick(4); break;
+
+      // 0xC0-0xCF
+      case 0xC0: this.retCond(!this.getZ()); break;
+      case 0xC1: this.BC = this.pop(); this.tick(12); break;
+      case 0xC2: this.jpCond(!this.getZ()); break;
+      case 0xC3: this.pc = this.read16(); this.tick(16); break;
+      case 0xC4: this.callCond(!this.getZ()); break;
+      case 0xC5: this.push(this.BC); this.tick(16); break;
+      case 0xC6: this.add(this.read8()); this.tick(8); break;
+      case 0xC7: this.rst(0x00); break;
+      case 0xC8: this.retCond(this.getZ()); break;
+      case 0xC9: this.pc = this.pop(); this.tick(16); break;
+      case 0xCA: this.jpCond(this.getZ()); break;
+      case 0xCB: this.execCB(); break;
+      case 0xCC: this.callCond(this.getZ()); break;
+      case 0xCD: this.call(); break;
+      case 0xCE: this.adc(this.read8()); this.tick(8); break;
+      case 0xCF: this.rst(0x08); break;
+
+      // 0xD0-0xDF
+      case 0xD0: this.retCond(!this.getC()); break;
+      case 0xD1: this.DE = this.pop(); this.tick(12); break;
+      case 0xD2: this.jpCond(!this.getC()); break;
+      case 0xD4: this.callCond(!this.getC()); break;
+      case 0xD5: this.push(this.DE); this.tick(16); break;
+      case 0xD6: this.sub(this.read8()); this.tick(8); break;
+      case 0xD7: this.rst(0x10); break;
+      case 0xD8: this.retCond(this.getC()); break;
+      case 0xD9: this.pc = this.pop(); this.ime = true; this.tick(16); break;
+      case 0xDA: this.jpCond(this.getC()); break;
+      case 0xDC: this.callCond(this.getC()); break;
+      case 0xDE: this.sbc(this.read8()); this.tick(8); break;
+      case 0xDF: this.rst(0x18); break;
+
+      // 0xE0-0xEF
+      case 0xE0: // LDH (a8),A
+        this.write(0xFF00 | this.read8(), this.a); this.tick(12); break;
+      case 0xE1: this.HL = this.pop(); this.tick(12); break;
+      case 0xE2: this.write(0xFF00 | this.c, this.a); this.tick(8); break;
+      case 0xE5: this.push(this.HL); this.tick(16); break;
+      case 0xE6: this.and(this.read8()); this.tick(8); break;
+      case 0xE7: this.rst(0x20); break;
+      case 0xE8: this.addSP(); break;
+      case 0xE9: this.pc = this.HL; this.tick(4); break;
+      case 0xEA: // LD (a16),A
+        a16 = this.read16();
+        this.write(a16, this.a); this.tick(16); break;
+      case 0xEE: this.xor(this.read8()); this.tick(8); break;
+      case 0xEF: this.rst(0x28); break;
+
+      // 0xF0-0xFF
+      case 0xF0: // LDH A,(a8)
+        this.a = this.read(0xFF00 | this.read8()); this.tick(12); break;
+      case 0xF1: this.AF = this.pop(); this.tick(12); break;
+      case 0xF2: this.a = this.read(0xFF00 | this.c); this.tick(8); break;
+      case 0xF3: this.ime = false; this.tick(4); break;
+      case 0xF5: this.push(this.AF); this.tick(16); break;
+      case 0xF6: this.or(this.read8()); this.tick(8); break;
+      case 0xF7: this.rst(0x30); break;
+      case 0xF8: this.ldHLsp(); break;
+      case 0xF9: this.sp = this.HL; this.tick(8); break;
+      case 0xFA: // LD A,(a16)
+        this.a = this.read(this.read16()); this.tick(16); break;
+      case 0xFB: this.imePending = true; this.tick(4); break;
+      case 0xFE: this.cp(this.read8()); this.tick(8); break;
+      case 0xFF: this.rst(0x38); break;
+
+      default: this.tick(4); break;
+    }
+  }
+
+  // === CB prefix ===
+  execCB() {
+    let cbOp = this.read(this.pc);
+    this.pc = (this.pc + 1) & 0xFFFF;
+    let regIdx = cbOp & 0x07;
+    let bitNum = (cbOp >> 3) & 0x07;
+    let block = cbOp >> 6;
+    let opType = (cbOp >> 3) & 0x1F;
+
+    let getReg = () => {
+      switch (regIdx) {
+        case 0: return this.b;
+        case 1: return this.c;
+        case 2: return this.d;
+        case 3: return this.e;
+        case 4: return this.h;
+        case 5: return this.l;
+        case 6: return this.readHL();
+        case 7: return this.a;
+      }
+    };
+    let setReg = (v) => {
+      v &= 0xFF;
+      switch (regIdx) {
+        case 0: this.b = v; break;
+        case 1: this.c = v; break;
+        case 2: this.d = v; break;
+        case 3: this.e = v; break;
+        case 4: this.h = v; break;
+        case 5: this.l = v; break;
+        case 6: this.writeHL(v); break;
+        case 7: this.a = v; break;
+      }
+    };
+    let isHL = regIdx === 6;
+
+    if (block === 0) {
+      // RLC/RRC/RL/RR/SLA/SRA/SWAP/SRL
+      let val = getReg();
+      switch (opType) {
+        case 0: // RLC
+          this.flagC(val >> 7);
+          val = ((val << 1) | (val >> 7)) & 0xFF;
+          this.flagZ(val === 0); break;
+        case 1: // RRC
+          this.flagC(val & 1);
+          val = ((val >> 1) | (val << 7)) & 0xFF;
+          this.flagZ(val === 0); break;
+        case 2: { // RL
+          let c = this.getC();
+          this.flagC(val >> 7);
+          val = ((val << 1) | c) & 0xFF;
+          this.flagZ(val === 0); break;
+        }
+        case 3: { // RR
+          let c = this.getC() << 7;
+          this.flagC(val & 1);
+          val = ((val >> 1) | c) & 0xFF;
+          this.flagZ(val === 0); break;
+        }
+        case 4: // SLA
+          this.flagC(val >> 7);
+          val = (val << 1) & 0xFF;
+          this.flagZ(val === 0); break;
+        case 5: // SRA
+          this.flagC(val & 1);
+          val = (val & 0x80) | (val >> 1);
+          this.flagZ(val === 0); break;
+        case 6: // SWAP
+          val = ((val << 4) | (val >> 4)) & 0xFF;
+          this.flagZ(val === 0); this.flagC(0); break;
+        case 7: // SRL
+          this.flagC(val & 1);
+          val = (val >> 1) & 0xFF;
+          this.flagZ(val === 0); break;
+      }
+      this.flagN(0); this.flagH(0);
+      setReg(val);
+      this.tick(isHL ? 16 : 8);
+    } else if (block === 1) {
+      // BIT
+      let val = getReg();
+      this.flagZ(!(val & (1 << bitNum)));
+      this.flagN(0); this.flagH(1);
+      this.tick(isHL ? 12 : 8);
+    } else if (block === 2) {
+      // RES
+      setReg(getReg() & ~(1 << bitNum));
+      this.tick(isHL ? 16 : 8);
+    } else {
+      // SET
+      setReg(getReg() | (1 << bitNum));
+      this.tick(isHL ? 16 : 8);
+    }
+  }
+
+  // === Helpers ===
+  read8() { let v = this.read(this.pc); this.pc = (this.pc + 1) & 0xFFFF; return v; }
+  read16() { let lo = this.read8(), hi = this.read8(); return (hi << 8) | lo; }
+  readHL() { return this.read(this.HL); }
+  writeHL(v) { this.write(this.HL, v); }
+
+  push(v) {
+    this.sp = (this.sp - 1) & 0xFFFF;
+    this.write(this.sp, (v >> 8) & 0xFF);
+    this.sp = (this.sp - 1) & 0xFFFF;
+    this.write(this.sp, v & 0xFF);
+  }
+
+  pop() {
+    let lo = this.read(this.sp);
+    this.sp = (this.sp + 1) & 0xFFFF;
+    let hi = this.read(this.sp);
+    this.sp = (this.sp + 1) & 0xFFFF;
+    return (hi << 8) | lo;
+  }
+
+  inc8(v) {
+    let r = (v + 1) & 0xFF;
+    this.flagZ(r === 0); this.flagN(0);
+    this.flagH((v & 0x0F) === 0x0F);
+    return r;
+  }
+
+  dec8(v) {
+    let r = (v - 1) & 0xFF;
+    this.flagZ(r === 0); this.flagN(1);
+    this.flagH((v & 0x0F) === 0);
+    return r;
+  }
+
+  add(v) {
+    let r = this.a + v;
+    this.flagZ((r & 0xFF) === 0);
+    this.flagN(0);
+    this.flagH((this.a & 0x0F) + (v & 0x0F) > 0x0F);
+    this.flagC(r > 0xFF);
+    this.a = r & 0xFF;
+  }
+
+  adc(v) {
+    let c = this.getC();
+    let r = this.a + v + c;
+    this.flagZ((r & 0xFF) === 0);
+    this.flagN(0);
+    this.flagH((this.a & 0x0F) + (v & 0x0F) + c > 0x0F);
+    this.flagC(r > 0xFF);
+    this.a = r & 0xFF;
+  }
+
+  sub(v) {
+    let r = this.a - v;
+    this.flagZ((r & 0xFF) === 0);
+    this.flagN(1);
+    this.flagH((this.a & 0x0F) < (v & 0x0F));
+    this.flagC(r < 0);
+    this.a = r & 0xFF;
+  }
+
+  sbc(v) {
+    let c = this.getC();
+    let r = this.a - v - c;
+    this.flagZ((r & 0xFF) === 0);
+    this.flagN(1);
+    this.flagH((this.a & 0x0F) < (v & 0x0F) + c);
+    this.flagC(r < 0);
+    this.a = r & 0xFF;
+  }
+
+  and(v) {
+    this.a &= v;
+    this.flagZ(this.a === 0); this.flagN(0); this.flagH(1); this.flagC(0);
+  }
+
+  xor(v) {
+    this.a ^= v;
+    this.flagZ(this.a === 0); this.flagN(0); this.flagH(0); this.flagC(0);
+  }
+
+  or(v) {
+    this.a |= v;
+    this.flagZ(this.a === 0); this.flagN(0); this.flagH(0); this.flagC(0);
+  }
+
+  cp(v) {
+    let r = this.a - v;
+    this.flagZ((r & 0xFF) === 0);
+    this.flagN(1);
+    this.flagH((this.a & 0x0F) < (v & 0x0F));
+    this.flagC(r < 0);
+  }
+
+  addHL(v) {
+    let r = this.HL + v;
+    this.flagN(0);
+    this.flagH((this.HL & 0xFFF) + (v & 0xFFF) > 0xFFF);
+    this.flagC(r > 0xFFFF);
+    this.HL = r & 0xFFFF;
+  }
+
+  addHLSp() {
+    let v = this.sp;
+    let r = this.HL + v;
+    this.flagN(0);
+    this.flagH((this.HL & 0xFFF) + (v & 0xFFF) > 0xFFF);
+    this.flagC(r > 0xFFFF);
+    this.HL = r & 0xFFFF;
+  }
+
+  addSP() {
+    let r8 = (this.read8() << 24) >> 24;
+    this.flagZ(0); this.flagN(0);
+    this.flagH((this.sp & 0x0F) + (r8 & 0x0F) > 0x0F);
+    this.flagC((this.sp & 0xFF) + (r8 & 0xFF) > 0xFF);
+    this.sp = (this.sp + r8) & 0xFFFF;
+    this.tick(16);
+  }
+
+  ldHLsp() {
+    let r8 = (this.read8() << 24) >> 24;
+    this.flagZ(0); this.flagN(0);
+    this.flagH((this.sp & 0x0F) + (r8 & 0x0F) > 0x0F);
+    this.flagC((this.sp & 0xFF) + (r8 & 0xFF) > 0xFF);
+    this.HL = (this.sp + r8) & 0xFFFF;
+    this.tick(12);
+  }
+
+  jr() {
+    let r8 = (this.read8() << 24) >> 24;
+    this.pc = (this.pc + r8) & 0xFFFF;
+    this.tick(12);
+  }
+
+  jrCond(cond) {
+    let r8 = (this.read8() << 24) >> 24;
+    if (cond) { this.pc = (this.pc + r8) & 0xFFFF; this.tick(12); }
+    else this.tick(8);
+  }
+
+  jpCond(cond) {
+    let a16 = this.read16();
+    if (cond) { this.pc = a16; this.tick(16); }
+    else this.tick(12);
+  }
+
+  call() {
+    let a16 = this.read16();
+    this.push(this.pc);
+    this.pc = a16;
+    this.tick(24);
+  }
+
+  callCond(cond) {
+    let a16 = this.read16();
+    if (cond) { this.push(this.pc); this.pc = a16; this.tick(24); }
+    else this.tick(12);
+  }
+
+  retCond(cond) {
+    this.tick(8);
+    if (cond) { this.pc = this.pop(); this.tick(12); }
+  }
+
+  rst(vec) {
+    this.push(this.pc);
+    this.pc = vec;
+    this.tick(16);
+  }
+
+  daa() {
+    let a = this.a;
+    if (!this.getN()) {
+      if (this.getC() || a > 0x99) { a += 0x60; this.flagC(1); }
+      if (this.getH() || (a & 0x0F) > 0x09) { a += 0x06; }
+    } else {
+      if (this.getC()) a -= 0x60;
+      if (this.getH()) a -= 0x06;
+    }
+    this.a = a & 0xFF;
+    this.flagZ(this.a === 0);
+    this.flagH(0);
+    this.tick(4);
+  }
+
+  loadROM(data) {
+    this.rom = new Uint8Array(data);
+    this.mbcType = data[0x0147];
+    this.reset();
+  }
+
+  reset() {
+    this.a = 0x01; this.f = 0xB0;
+    this.b = 0x00; this.c = 0x13;
+    this.d = 0x00; this.e = 0xD8;
+    this.h = 0x01; this.l = 0x4D;
+    this.sp = 0xFFFE; this.pc = 0x0100;
+    this.vram.fill(0); this.wram.fill(0); this.oam.fill(0);
+    this.io.fill(0); this.hram.fill(0);
+    this.romBank = 1; this.ramBank = 0; this.ramEnable = false; this.ram.fill(0);
+    this.scanline = 0; this.lineCycles = 0;
+    this._divCounter = 0xAB00; this.TIMA = 0; this.TMA = 0; this.TAC = 0xF8;
+    this.systemCycles = 0;
+    this.interruptFlags = 0x00;
+    this.ie = 0;
+    this.ime = true; this.imePending = false;
+    this.halted = false; this.stopped = false;
+    this.joypadState = 0xFF; this.joypadSelect = 0;
+    this._prevTimerBit = false;
+
+    this.io[0x40] = 0x91; // LCD on, BG on
+    this.io[0x47] = 0xE4; // BGP
+    this.io[0x48] = 0xE4; // OBP0
+    this.io[0x49] = 0xE4; // OBP1
+    this.io[0x41] = 0x80; // STAT
+  }
+}
+
+function inc16(v) { return (v + 1) & 0xFFFF; }
+function dec16(v) { return (v - 1) & 0xFFFF; }
+
+// ===========================
+// UI & Main Loop
+// ===========================
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const statusMsg = document.getElementById('statusMsg');
+const fpsDisplay = document.getElementById('fpsDisplay');
+
+let gb = new GameBoy();
+let running = false;
+let animId = null;
+let fpsFrames = 0, fpsLast = performance.now();
+
+function render() {
+  let img = new ImageData(gb.frameBuffer, 160, 144);
+  ctx.putImageData(img, 0, 0);
+}
+
+function runFrame() {
+  gb.systemCycles = 0;
+  while (gb.systemCycles < CYCLES_PER_FRAME) {
+    gb.step();
+  }
+}
+
+function loop() {
+  if (!running) return;
+  runFrame();
+  render();
+
+  fpsFrames++;
+  let now = performance.now();
+  if (now - fpsLast >= 1000) {
+    fpsDisplay.textContent = `${fpsFrames} FPS`;
+    fpsFrames = 0;
+    fpsLast = now;
+  }
+
+  animId = requestAnimationFrame(loop);
+}
+
+function start() {
+  if (gb.rom.every(b => b === 0)) {
+    statusMsg.textContent = 'Load a ROM file first';
+    return;
+  }
+  if (running) return;
+  running = true;
+  statusMsg.textContent = 'Running...';
+  loop();
+}
+
+function stop() {
+  running = false;
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+  statusMsg.textContent = 'Paused';
+}
+
+document.getElementById('runBtn').addEventListener('click', start);
+document.getElementById('pauseBtn').addEventListener('click', stop);
+document.getElementById('resetBtn').addEventListener('click', () => {
+  let wasRunning = running;
+  stop();
+  gb.reset();
+  render();
+  statusMsg.textContent = 'Reset';
+  if (wasRunning) start();
+});
+
+document.getElementById('scaleSelect').addEventListener('change', function() {
+  let s = parseInt(this.value);
+  canvas.style.width = `${160 * s}px`;
+  canvas.style.height = `${144 * s}px`;
+});
+
+document.getElementById('romFile').addEventListener('change', function(e) {
+  let file = e.target.files[0];
+  if (!file) return;
+  stop();
+  let reader = new FileReader();
+  reader.onload = () => {
+    let data = new Uint8Array(reader.result);
+    gb.loadROM(data);
+    statusMsg.textContent = `Loaded: ${file.name} (${(data.length/1024).toFixed(1)}KB, MBC:${gb.mbcType})`;
+    render();
+  };
+  reader.onerror = () => { statusMsg.textContent = 'Error loading ROM'; };
+  reader.readAsArrayBuffer(file);
+});
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  e.preventDefault();
+  gb.keyDown(e.key);
+});
+
+document.addEventListener('keyup', e => {
+  if (e.target.tagName === 'INPUT') return;
+  e.preventDefault();
+  gb.keyUp(e.key);
+});
+
+render();
+</script>
+</body>
+</html>

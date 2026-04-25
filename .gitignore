@@ -1,0 +1,8 @@
+*.gb
+*.gbc
+*.ppm
+# Screenshots
+# *.png
+# !1.png
+node_modules/
+.DS_Store
